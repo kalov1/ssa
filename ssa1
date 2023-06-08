@@ -1,0 +1,248 @@
+ip-адресса и имена по таблице;
+WEB-L + WEB-R:
+Скачать resolvconf
+в nano /etc/network/interfaces добавить под интерфейсом
+____
+dns-nameservers 3.3.3.1 192.168.10*.200
+____
+ISP:
+nano /etc/sysctl.conf
+_____
+	net.ipv4.ip_forward=1
+_____
+sysctl -p
+
+RTR-L:
+ip route 0.0.0.0 0.0.0.0 4.4.4.1
+
+RTR-R:
+ip route 0.0.0.0 0.0.0.0 5.5.5.1
+
+RTR-L:
+int g1
+ip nat outside
+int g2
+ip nat inside
+access-list 1 permit 192.168.10*.0 0.0.0.255
+ip nat inside source list 1 int g1 overload
+
+RTR-R:
+int g1
+ip nat outside
+int g2
+ip nat inside
+access-list 1 permit 172.16.10*.0 0.0.0.255
+ip nat inside source list 1 int g1 overload
+
+RTR-L:
+int tun1
+ip address 172.16.1.1 255.255.255.0
+tunnel mode gre ip
+tunnel source 4.4.4.100
+tunnel destination 5.5.5.100
+
+RTR-R:
+int tun1
+ip address 172.16.1.2 255.255.255.0
+tunnel mode gre ip
+tunnel source 5.5.5.100
+tunnel destination 4.4.4.100
+
+RTR-L: все что идет после deny не пропускается
+ip access-list extended Lnew
+permit tcp any any established
+permit udp any any eq ntp(123)
+permit udp any any eq domain(53)
+permit tcp any any eq domain(53)
+permit tcp any any eq www(80)
+permit tcp any any eq 443
+permit tcp any host 4.4.4.100 eq 2222
+permit esp any any
+permit icmp any any
+permit gre any any
+deny tcp any any
+deny udp any any
+int g1
+ip access-group Lnew in
+
+RTR-R: все что идет после deny не пропускается
+ip access-list extended Rnew
+permit tcp any any established
+permit tcp any any eq www(80)
+permit tcp any any eq 443
+permit icmp any any
+permit tcp any host 5.5.5.100 eq 2244
+permit esp any any
+permit gre any any
+deny tcp any any
+deny udp any any
+int g1
+ip access-group Rnew in
+
+RTR-L:				что получаешь		куда обращаешься
+ip nat inside source static tcp 192.168.10*.100 22 4.4.4.100 2222
+
+RTR-R:				что получаешь		куда обращаешься
+ip nat inside source static tcp 172.16.10*.100 22 5.5.5.100 2244
+
+WEB-L + WEB-R:
+Добавить диски
+apt-cdrom add
+apt install openssh-server ssh -y
+systemctl start sshd
+systemctl enable ssh
+
+ISP:
+Добавить диски
+apt-cdrom add
+apt install bind9 -y
+mkdir /opt/dns
+cp /etc/bind/db.local /opt/dns/demo.db
+chown -R bind:bind /opt/dns
+nano /etc/apparmor.d/usr.sbin.named
+под /var/cache/bind/ rw,
+____
+  /opt/dns/** rw,
+____
+systemctl restart apparmor.service
+nano /etc/bind/named.conf.options
+____
+  forwarders {
+	4.4.4.100
+	};
+____
+nano /etc/bind/named.conf.default-zones
+____
+  zone "demo.wsr" {
+	type master;
+	allow-transfer { any; };
+	file "/opt/dns/demo.db";
+  };
+____
+nano /opt/dns/demo.db
+____
+  @	IN	SOA	demo.wsr.	root.demo.wsr. (
+
+  @	IN	NS	isp.demo.wsr.
+  isp	IN	A	3.3.3.1
+  www	IN	A	4.4.4.100
+  www	IN	A	5.5.5.100
+  internet CNAME isp.demo.wsr.
+  int	IN	NS	rtr-l.demo.wsr
+  rtr-l	IN	A	4.4.4.100
+____
+systemctl restart bind9
+
+RTR-L:					что получаешь  куда обращаешься
+ip nat inside source static tcp 192.168.10*.200 53 4.4.4.100 53
+ip nat inside source static udp 192.168.10*.200 53 4.4.4.100 53
+
+SRV:
+Добавить роль DNS
+Записи согласно таблице + обратные зоны
+
+CLI + SRV:
+Добавить правило firewall'а с именем NTP (port 123)
+Powershell:
+Start-Service W32Time
+w32tm /config /manualpeerlist:4.4.4.1 /syncfromflags:manual /reliable:yes /update
+Restart-Service W32Time
+
+ISP:
+apt install chrony -y
+nano /etc/chrony/chrony.conf
+____
+local stratum 4
+allow 4.4.4.0/24
+allow 3.3.3.0/24
+allow 192.168.10*.0/24
+_____
+systemctl restart chronyd
+chronyc clients(проверка синхронизации)
+
+RTR-L + RTR-R:
+ip domain name int.demo.wsr
+ip name-server 192.168.10*.200
+ntp server ntp.int.demo.wsr
+
+WEB-L + WEB-R:
+apt-cdrom add
+apt install -y chrony 
+nano /etc/chrony/chrony.conf
+___
+server 192.168.10*.200	
+pool ntp.int.demo.wsr iburst
+allow 192.168.100.0/24
+____
+systemctl restart chrony
+chronyc sources(проверка синхронизации)
+
+SRV:
+PowerShell(Admin)
+New-StoragePool -FriendlyName "POOLRAID1" -StorageSubsystemFriendlyName "Windows Storage*" -PhysicalDisks (Get-PhysicalDisk -CanPool $True)
+New-VirtualDisk -StoragePoolFriendlyName "POOLRAID1" -FriendlyName "RAID1" -ResilienctSettingName Mirror -UseMaximumSize
+Initialize-Disk -FriendlyName "RAID1"
+New-Partition -DiskNumber 3 -UseMaximumSize -DriveLetter R
+Format-Volume -DriveLetter R
+Добавить Роль
+File and Storage Services > File and iSCSI Services > File Server
+New-Item -Path R:\storage -ItemType Directory
+New-SmbShare -Name "SMB" -Path "R:\storage" -FullAccess "Everyone"
+
+WEB-L + WEB-R:
+apt install cifs-utils -y
+nano /root/.smbclient
+____
+	username=Administrator
+	password=P@ssw0rd
+____
+nano /etc/fstab
+_____
+//192.168.10*.200(Адрес SRV)/smb /opt/share cifs user,rw,_netdev,credentials=/root/.smbclient
+_____
+mkdir /opt/share
+mount -a
+
+SRV: (Хватит только установки, сертификат сделать тестовый)
+Установить роль Active Directory Certificate Services, в Role Services > Cetrification Authority Web Enrollment
+
+RTR-L:
+no ip http server
+no ip http secure-server
+ip nat inside source static tcp 192.168.10*.100 80 4.4.4.100 80
+ip nat inside source static tcp 192.168.10*.100 443 4.4.4.100 443
+
+RTR-R:
+no ip http server
+no ip http secure-server
+ip nat inside source static tcp 172.16.10*.100 80 5.5.5.100 80
+ip nat inside source static tcp 172.16.10*.100 443 5.5.5.100 443
+
+WEB-L + WEB-R: Установка докера
+mount /dev/sr* /mnt/app/ (Должны быть файлы с appdocker0.zip)
+apt install /mnt/app/containerd.io*
+apt install /mnt/app/docker*
+docker image load -i /mnt/app/appdocker0.zip
+docker run --restart always -p 5000:5000 -d appdocker0:latest
+systemctl enable docker --now
+
+WEB-L + WEB-R: nginx
+apt install nginx
+nano /etc/nginx/sites-available/default
+_____
+коментировать все, что не закоментировано
+upstream backend {
+  server 192.168.100.100:5000 fail_timeout=25;
+  server 172.16.100.100:5000 fail_timeout=25;
+}
+server {
+	listen 80;
+	server_name www.demo.wsr;
+	location / {
+		proxy_pass http://backend;
+	}
+}
+_____
+Проверить сайт с CLI http://www.demo.wsr
+http://www.demo.wsr/get
+http://www.demo.wsr/health
